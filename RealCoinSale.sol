@@ -1,138 +1,227 @@
 pragma solidity ^0.4.16;
 
-/*
+contract owned {
+    address public owner;
 
-  Real Coin ERC20 Sale Contract
+    function owned() public {
+        owner = msg.sender;
+    }
 
-  @author Danny Kim
+    modifier onlyOwner {
+        require(msg.sender == owner);
+        _;
+    }
 
-*/
-
-
-contract ERC20 {
-  uint public totalSupply;
-  function balanceOf(address who) constant returns (uint);
-  function allowance(address owner, address spender) constant returns (uint);
-  function transfer(address to, uint value) returns (bool ok);
-  function transferFrom(address from, address to, uint value) returns (bool ok);
-  function approve(address spender, uint value) returns (bool ok);
-  function mintToken(address to, uint256 value) returns (uint256);
-  function changeTransfer(bool allowed);
+    function transferOwnership(address newOwner) onlyOwner public {
+        owner = newOwner;
+    }
 }
 
+interface tokenRecipient { function receiveApproval(address _from, uint256 _value, address _token, bytes _extraData) public; }
 
-contract Sale {
+contract TokenERC20 {
+    string public name;
+    string public symbol;
+    uint8 public decimals;
+    uint256 public totalSupply;
 
-    uint256 public maxMintable;
-    uint256 public totalMinted;
-    uint public endBlock;
-    uint public startBlock;
-    uint public exchangeRate;
-    bool public isFunding;
-    ERC20 public Token;
-    address public ETHWallet;
-    uint256 public heldTotal;
+    mapping (address => uint256) public balanceOf;
+    mapping (address => mapping (address => uint256)) public allowance;
 
-    bool private configSet;
-    address public creator;
+    event Transfer(address indexed from, address indexed to, uint256 value);
 
-    mapping (address => uint256) public heldTokens;
-    mapping (address => uint) public heldTimeline;
+    event Burn(address indexed from, uint256 value);
 
-    event Contribution(address from, uint256 amount);
-    event ReleaseTokens(address from, uint256 amount);
-
-    function Sale() {
-        startBlock = block.number;
-        maxMintable = 1000000000; // (18 decimals)
-        ETHWallet = 0xF04d145dd24E05E6ac9149302B62970769795fBa;
-        isFunding = true;
-        creator = msg.sender;
-        createHeldCoins();
-        exchangeRate = 600;
+    /**
+     * Constrctor function
+     *
+     * Initializes contract with initial supply tokens to the creator of the contract
+     */
+    function TokenERC20(
+        uint256 initialSupply,
+        string tokenName,
+        string tokenSymbol
+    ) public {
+        totalSupply = initialSupply * 10 ** uint256(decimals);
+        balanceOf[msg.sender] = initialSupply;
+        name = tokenName;
+        symbol = tokenSymbol;
     }
 
-    // setup function to be ran only 1 time
-    // setup token address
-    // setup end Block number
-    function setup(address TOKEN, uint endBlockTime) {
-        require(!configSet);
-        Token = ERC20(TOKEN);
-        endBlock = endBlockTime;
-        configSet = true;
+    /**
+     * Internal transfer, only can be called by this contract
+     */
+    function _transfer(address _from, address _to, uint _value) internal {
+        require(_to != 0x0);
+        require(balanceOf[_from] >= _value);
+        require(balanceOf[_to] + _value > balanceOf[_to]);
+        uint previousBalances = balanceOf[_from] + balanceOf[_to];
+        balanceOf[_from] -= _value;
+        balanceOf[_to] += _value;
+        Transfer(_from, _to, _value);
+        assert(balanceOf[_from] + balanceOf[_to] == previousBalances);
     }
 
-    function closeSale() external {
-      require(msg.sender==creator);
-      isFunding = false;
+    /**
+     * Transfer tokens
+     *
+     * Send `_value` tokens to `_to` from your account
+     *
+     * @param _to The address of the recipient
+     * @param _value the amount to send
+     */
+    function transfer(address _to, uint256 _value) public {
+        _transfer(msg.sender, _to, _value);
     }
 
-    // CONTRIBUTE FUNCTION
-    // converts ETH to TOKEN and sends new TOKEN to the sender
-    function contribute() external payable {
-        require(msg.value>0);
-        require(isFunding);
-        require(block.number <= endBlock);
-        uint256 amount = msg.value * exchangeRate;
-        uint256 total = totalMinted + amount;
-        require(total<=maxMintable);
-        totalMinted += total;
-        ETHWallet.transfer(msg.value);
-        Token.mintToken(msg.sender, amount);
-        Contribution(msg.sender, amount);
+    /**
+     * Transfer tokens from other address
+     *
+     * Send `_value` tokens to `_to` in behalf of `_from`
+     *
+     * @param _from The address of the sender
+     * @param _to The address of the recipient
+     * @param _value the amount to send
+     */
+    function transferFrom(address _from, address _to, uint256 _value) public returns (bool success) {
+        require(_value <= allowance[_from][msg.sender]);
+        allowance[_from][msg.sender] -= _value;
+        _transfer(_from, _to, _value);
+        return true;
     }
 
-    // update the ETH/COIN rate
-    function updateRate(uint256 rate) external {
-        require(msg.sender==creator);
-        require(isFunding);
-        exchangeRate = rate;
+    /**
+     * Set allowance for other address
+     *
+     * Allows `_spender` to spend no more than `_value` tokens in your behalf
+     *
+     * @param _spender The address authorized to spend
+     * @param _value the max amount they can spend
+     */
+    function approve(address _spender, uint256 _value) public
+        returns (bool success) {
+        allowance[msg.sender][_spender] = _value;
+        return true;
     }
 
-    // change creator address
-    function changeCreator(address _creator) external {
-        require(msg.sender==creator);
-        creator = _creator;
+    /**
+     * Set allowance for other address and notify
+     *
+     * Allows `_spender` to spend no more than `_value` tokens in your behalf, and then ping the contract about it
+     *
+     * @param _spender The address authorized to spend
+     * @param _value the max amount they can spend
+     * @param _extraData some extra information to send to the approved contract
+     */
+    function approveAndCall(address _spender, uint256 _value, bytes _extraData)
+        public
+        returns (bool success) {
+        tokenRecipient spender = tokenRecipient(_spender);
+        if (approve(_spender, _value)) {
+            spender.receiveApproval(msg.sender, _value, this, _extraData);
+            return true;
+        }
     }
 
-    // change transfer status for ERC20 token
-    function changeTransferStats(bool _allowed) external {
-        require(msg.sender==creator);
-        Token.changeTransfer(_allowed);
+    /**
+     * Destroy tokens
+     *
+     * Remove `_value` tokens from the system irreversibly
+     *
+     * @param _value the amount of money to burn
+     */
+    function burn(uint256 _value) public returns (bool success) {
+        require(balanceOf[msg.sender] >= _value);   // Check if the sender has enough
+        balanceOf[msg.sender] -= _value;            // Subtract from the sender
+        totalSupply -= _value;                      // Updates totalSupply
+        Burn(msg.sender, _value);
+        return true;
     }
 
-    // internal function that allocates a specific amount of Tokens at a specific block number.
-    // only ran 1 time on initialization
-    function createHeldCoins() internal {
-	// TOTAL SUPPLY = 1,000,000,000
-	createHoldToken(msg.sender, 500000000);
-	createHoldToken(0x393c82c7Ae55B48775f4eCcd2523450d291f2445, 100000000);
-	createHoldToken(0x393c82c7Ae55B48775f4eCcd2523450d291f9550, 100000000);
-	createHoldToken(0x393c82c7Ae55B48775f4eCcd2523450d291f2418, 100000000);
-	createHoldToken(0x393c82c7Ae55B48775f4eCcd2523450d291f5357, 100000000);
-	createHoldToken(0x393c82c7Ae55B48775f4eCcd2523450d26678424, 100000000);
+    /**
+     * Destroy tokens from other account
+     *
+     * Remove `_value` tokens from the system irreversibly on behalf of `_from`.
+     *
+     * @param _from the address of the sender
+     * @param _value the amount of money to burn
+     */
+    function burnFrom(address _from, uint256 _value) public returns (bool success) {
+        require(balanceOf[_from] >= _value);
+        require(_value <= allowance[_from][msg.sender]);
+        balanceOf[_from] -= _value;
+        allowance[_from][msg.sender] -= _value;
+        totalSupply -= _value;
+        Burn(_from, _value);
+        return true;
+    }
+}
+
+contract MyAdvancedToken is owned, TokenERC20 {
+
+    uint256 public sellPrice;
+    uint256 public buyPrice;
+
+    mapping (address => bool) public frozenAccount;
+
+    event FrozenFunds(address target, bool frozen);
+
+    /* Initializes contract with initial supply tokens to the creator of the contract */
+    function MyAdvancedToken(
+        uint256 initialSupply,
+        string tokenName,
+        string tokenSymbol
+    ) TokenERC20(initialSupply, tokenName, tokenSymbol) public {}
+
+    /* Internal transfer, only can be called by this contract */
+    function _transfer(address _from, address _to, uint _value) internal {
+        require (_to != 0x0);                               // Prevent transfer to 0x0 address. Use burn() instead
+        require (balanceOf[_from] >= _value);               // Check if the sender has enough
+        require (balanceOf[_to] + _value > balanceOf[_to]); // Check for overflows
+        require(!frozenAccount[_from]);                     // Check if sender is frozen
+        require(!frozenAccount[_to]);                       // Check if recipient is frozen
+        balanceOf[_from] -= _value;                         // Subtract from the sender
+        balanceOf[_to] += _value;                           // Add the same to the recipient
+        Transfer(_from, _to, _value);
     }
 
-    // function to create held tokens for developer
-    function createHoldToken(address _to, uint256 amount) internal {
-        heldTokens[_to] = amount;
-        heldTimeline[_to] = block.number + 0;
-        heldTotal += amount;
-        totalMinted += heldTotal;
+    /// @notice Create `mintedAmount` tokens and send it to `target`
+    /// @param target Address to receive the tokens
+    /// @param mintedAmount the amount of tokens it will receive
+    function mintToken(address target, uint256 mintedAmount) onlyOwner public {
+        balanceOf[target] += mintedAmount;
+        totalSupply += mintedAmount;
+        Transfer(0, this, mintedAmount);
+        Transfer(this, target, mintedAmount);
     }
 
-    // function to release held tokens for developers
-    function releaseHeldCoins() external {
-        uint256 held = heldTokens[msg.sender];
-        uint heldBlock = heldTimeline[msg.sender];
-        require(!isFunding);
-        require(held >= 0);
-        require(block.number >= heldBlock);
-        heldTokens[msg.sender] = 0;
-        heldTimeline[msg.sender] = 0;
-        Token.mintToken(msg.sender, held);
-        ReleaseTokens(msg.sender, held);
+    /// @notice `freeze? Prevent | Allow` `target` from sending & receiving tokens
+    /// @param target Address to be frozen
+    /// @param freeze either to freeze it or not
+    function freezeAccount(address target, bool freeze) onlyOwner public {
+        frozenAccount[target] = freeze;
+        FrozenFunds(target, freeze);
     }
 
+    /// @notice Allow users to buy tokens for `newBuyPrice` eth and sell tokens for `newSellPrice` eth
+    /// @param newSellPrice Price the users can sell to the contract
+    /// @param newBuyPrice Price users can buy from the contract
+    function setPrices(uint256 newSellPrice, uint256 newBuyPrice) onlyOwner public {
+        sellPrice = newSellPrice;
+        buyPrice = newBuyPrice;
+    }
 
+    /// @notice Buy tokens from contract by sending ether
+    function buy() payable public {
+        uint amount = msg.value / buyPrice;
+        _transfer(this, msg.sender, amount);
+    }
+
+    /// @notice Sell `amount` tokens to contract
+    /// @param amount amount of tokens to be sold
+    function sell(uint256 amount) public {
+        require(this.balance >= amount * sellPrice);
+        _transfer(msg.sender, this, amount);
+        msg.sender.transfer(amount * sellPrice);
+    }
 }
